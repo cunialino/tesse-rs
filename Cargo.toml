@@ -1,0 +1,12 @@
+[package]
+name = "tesse-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+crossterm = "0.29.0"
+portable-pty = "0.9.0"
+ratatui = "0.29.0"
+tokio = { version = "1.45.1", features = ["full"] }
+vte = "0.15.0"
+
