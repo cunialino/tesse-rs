@@ -5,6 +5,8 @@ pub struct TerminalPerformer {
     buffer: Arc<Mutex<Vec<String>>>,
     pub current_line: String,
     cursor_col: usize,
+    cursor_row: usize,
+    pub nrows: u16,
 }
 
 impl TerminalPerformer {
@@ -13,19 +15,34 @@ impl TerminalPerformer {
             buffer,
             current_line: String::new(),
             cursor_col: 0,
+            cursor_row: 0,
+            nrows: 0,
         }
     }
 
     pub fn flush_line(&mut self) {
-        let line = self.current_line.clone();
         let mut buf = self.buffer.lock().unwrap();
-        buf.push(line);
-        let buff_len = buf.len();
-        if buff_len > 1000 {
-            buf.drain(0..buff_len - 1000);
+        buf.push(std::mem::take(&mut self.current_line));
+
+        let bl = buf.len();
+        if buf.len() > 1000 {
+            buf.drain(0..bl - 1000);
         }
-        self.current_line.clear();
+
         self.cursor_col = 0;
+    }
+
+    pub fn clear_screen(&mut self) {
+        let mut buf = self.buffer.lock().unwrap();
+
+        // Flush current line
+        buf.push(std::mem::take(&mut self.current_line));
+
+        // Push enough empty lines to "clear" the visible area
+        for _ in 0..self.nrows {
+            buf.push("\n".into());
+        }
+
     }
 }
 
@@ -56,6 +73,11 @@ impl Perform for TerminalPerformer {
                     }
                 }
             }
+            0x0C /* FF */ => {
+                self.clear_screen();
+                self.cursor_row = 0;
+                self.cursor_col = 0;
+            }
             _ => {}
         }
     }
@@ -66,4 +88,3 @@ impl Perform for TerminalPerformer {
     fn csi_dispatch(&mut self, _: &vte::Params, _: &[u8], _: bool, _: char) {}
     fn esc_dispatch(&mut self, _: &[u8], _: bool, _: u8) {}
 }
-

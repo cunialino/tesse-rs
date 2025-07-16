@@ -103,6 +103,46 @@ impl TerminalSession {
     }
 }
 
+use crossterm::event::{KeyEvent, KeyModifiers};
+
+pub fn encode_key_event(event: KeyEvent) -> Vec<u8> {
+    use KeyCode::*;
+    let KeyEvent {
+        code, modifiers, ..
+    } = event;
+
+    match (code, modifiers) {
+        // Ctrl + a-z
+        (Char(c), m) if m.contains(KeyModifiers::CONTROL) && c.is_ascii_lowercase() => {
+            vec![(c as u8 - b'a' + 1)]
+        }
+
+        // Alt + char
+        (Char(c), m) if m.contains(KeyModifiers::ALT) => {
+            let mut v = vec![0x1B]; // ESC
+            v.extend_from_slice(c.to_string().as_bytes());
+            v
+        }
+
+        // Normal character with no modifiers
+        (Char(c), m) if m.is_empty() => c.to_string().into_bytes(),
+
+        // Arrow keys
+        (Left, _) => b"\x1B[D".to_vec(),
+        (Right, _) => b"\x1B[C".to_vec(),
+        (Up, _) => b"\x1B[A".to_vec(),
+        (Down, _) => b"\x1B[B".to_vec(),
+
+        // Enter, Backspace, Tab, Esc
+        (Enter, _) => vec![b'\r'],
+        (Backspace, _) => vec![0x7F],
+        (Tab, _) => vec![b'\t'],
+        (Esc, _) => vec![0x1B],
+
+        _ => vec![], // Other keys: ignore for now
+    }
+}
+
 struct App {
     session: TerminalSession,
     should_quit: bool,
@@ -117,23 +157,14 @@ impl App {
             should_quit: false,
         })
     }
-
-    async fn handle_key(&mut self, key: KeyCode) -> Result<(), Box<dyn Error>> {
-        match key {
-            KeyCode::Char(c) => {
-                self.session.send_input(&c.to_string()).await?;
-            }
-            KeyCode::Enter => {
-                self.session.send_input("\n").await?;
-            }
-            KeyCode::Backspace => {
-                self.session.send_input("\x7f").await?;
-            }
-            KeyCode::Tab => {
-                self.session.send_input("\t").await?;
-            }
-            KeyCode::Esc => self.should_quit = true,
-            _ => {}
+    async fn handle_key(&mut self, event: KeyEvent) -> Result<(), Box<dyn Error>> {
+        if event.code == KeyCode::Esc {
+            self.should_quit = true;
+        } else {
+            let bytes = encode_key_event(event);
+            self.session
+                .send_input(&String::from_utf8_lossy(&bytes))
+                .await?;
         }
         Ok(())
     }
@@ -153,6 +184,8 @@ impl App {
         let term = Paragraph::new(text)
             .block(Block::default().borders(Borders::ALL).title("Terminal"))
             .style(Style::default().fg(Color::White));
+        let nrows = chunks[0].height;
+        self.session.performer.lock().unwrap().nrows = nrows;
         f.render_widget(term, chunks[0]);
     }
 }
@@ -170,7 +203,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         if event::poll(Duration::from_millis(50))? {
             if let Event::Key(ev) = event::read()? {
-                app.handle_key(ev.code).await?;
+                app.handle_key(ev).await?;
             }
         }
 
