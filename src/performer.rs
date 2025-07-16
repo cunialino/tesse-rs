@@ -1,90 +1,97 @@
 use std::sync::{Arc, Mutex};
-use vte::Perform;
+use vte::{Params, Perform, Parser};
+use crate::screen::Screen;
 
+/// A performer that applies parsed bytes to our Screen model
 pub struct TerminalPerformer {
-    buffer: Arc<Mutex<Vec<String>>>,
-    pub current_line: String,
-    cursor_col: usize,
-    cursor_row: usize,
-    pub nrows: u16,
+    pub screen: Arc<Mutex<Screen>>,
+    // Buffer for intermediate OSC/DCS if needed later
+    pub osc_buffer: Vec<u8>,
 }
 
 impl TerminalPerformer {
-    pub fn new(buffer: Arc<Mutex<Vec<String>>>) -> Self {
-        Self {
-            buffer,
-            current_line: String::new(),
-            cursor_col: 0,
-            cursor_row: 0,
-            nrows: 0,
+    /// Create a new performer given a shared Screen
+    pub fn new(screen: Arc<Mutex<Screen>>) -> Self {
+        TerminalPerformer {
+            screen,
+            osc_buffer: Vec::new(),
         }
-    }
-
-    pub fn flush_line(&mut self) {
-        let mut buf = self.buffer.lock().unwrap();
-        buf.push(std::mem::take(&mut self.current_line));
-
-        let bl = buf.len();
-        if buf.len() > 1000 {
-            buf.drain(0..bl - 1000);
-        }
-
-        self.cursor_col = 0;
-    }
-
-    pub fn clear_screen(&mut self) {
-        let mut buf = self.buffer.lock().unwrap();
-
-        // Flush current line
-        buf.push(std::mem::take(&mut self.current_line));
-
-        // Push enough empty lines to "clear" the visible area
-        for _ in 0..self.nrows {
-            buf.push("\n".into());
-        }
-
     }
 }
 
 impl Perform for TerminalPerformer {
     fn print(&mut self, c: char) {
-        if self.cursor_col >= self.current_line.len() {
-            self.current_line.push(c);
-        } else {
-            self.current_line
-                .replace_range(self.cursor_col..self.cursor_col + 1, &c.to_string());
-        }
-        self.cursor_col += 1;
+        let mut s = self.screen.lock().unwrap();
+        s.put_char(c);
     }
+
     fn execute(&mut self, byte: u8) {
+        let mut s = self.screen.lock().unwrap();
         match byte {
-            b'\n' => self.flush_line(),
-            b'\r' => self.cursor_col = 0,
-            b'\t' => {
-                for _ in 0..4 {
-                    self.print(' ');
-                }
+            b'\n' => s.line_feed(),
+            b'\r' => s.cursor_col = 0,
+            0x0C    /* FF */ => s.clear(),
+            _ => {},
+        }
+    }
+
+    fn csi_dispatch(
+        &mut self,
+        params: &Params,
+        _intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
+        let mut s = self.screen.lock().unwrap();
+        match action {
+            // Cursor Position: CSI <row> ; <col> H
+            'H' | 'f' => {
+                let row = params.first()
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
+                let col = params.get(1)
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
+                s.cursor_row = (row.saturating_sub(1)).min(s.rows - 1);
+                s.cursor_col = (col.saturating_sub(1)).min(s.cols - 1);
             }
-            b'\x08' => {
-                if self.cursor_col > 0 {
-                    self.cursor_col -= 1;
-                    if self.cursor_col < self.current_line.len() {
-                        self.current_line.remove(self.cursor_col);
-                    }
-                }
+            // Cursor Up: CSI <n> A
+            'A' => {
+                let n = params.first()
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
+                s.cursor_row = s.cursor_row.saturating_sub(n);
             }
-            0x0C /* FF */ => {
-                self.clear_screen();
-                self.cursor_row = 0;
-                self.cursor_col = 0;
+            // Cursor Down: CSI <n> B
+            'B' => {
+                let n = params.first()
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(1);
+                s.cursor_row = (s.cursor_row + n).min(s.rows - 1);
+            }
+            // Erase Display: CSI 2 J  -> clear screen
+            'J' => {
+                let mode = params.first()
+                    .and_then(|p| std::str::from_utf8(p).ok())
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                if mode == 2 {
+                    s.clear();
+                }
             }
             _ => {}
         }
     }
-    fn hook(&mut self, _p: &vte::Params, _i: &[u8], _ignore: bool, _c: char) {}
-    fn put(&mut self, _b: u8) {}
+
+    // No-ops for now
+    fn hook(&mut self, _: &Params, _: &[u8], _: bool, _: char) {}
+    fn put(&mut self, _: u8) {}
     fn unhook(&mut self) {}
     fn osc_dispatch(&mut self, _: &[&[u8]], _: bool) {}
-    fn csi_dispatch(&mut self, _: &vte::Params, _: &[u8], _: bool, _: char) {}
     fn esc_dispatch(&mut self, _: &[u8], _: bool, _: u8) {}
 }
+
