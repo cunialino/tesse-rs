@@ -1,6 +1,7 @@
-use std::sync::{Arc, Mutex};
-use vte::{Params, Perform, Parser};
 use crate::screen::Screen;
+use std::sync::{Arc, Mutex};
+use tracing::info;
+use vte::{Params, Perform};
 
 /// A performer that applies parsed bytes to our Screen model
 pub struct TerminalPerformer {
@@ -37,7 +38,7 @@ impl Perform for TerminalPerformer {
 
     fn csi_dispatch(
         &mut self,
-        params: &Params,
+        params: &Params, // params is an iterator, so we need to make it mutable
         _intermediates: &[u8],
         _ignore: bool,
         action: char,
@@ -45,42 +46,55 @@ impl Perform for TerminalPerformer {
         let mut s = self.screen.lock().unwrap();
         match action {
             // Cursor Position: CSI <row> ; <col> H
+            // CSI Ps ; Ps H
+            //   Cursor Position [row;column] (default = [1;1]) (CUH).
             'H' | 'f' => {
-                let row = params.first()
-                    .and_then(|p| std::str::from_utf8(p).ok())
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1);
-                let col = params.get(1)
-                    .and_then(|p| std::str::from_utf8(p).ok())
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1);
-                s.cursor_row = (row.saturating_sub(1)).min(s.rows - 1);
-                s.cursor_col = (col.saturating_sub(1)).min(s.cols - 1);
+                let mut it = params.iter();
+                let row = it.next().and_then(|p| p.get(0)).copied().unwrap_or(1) as usize;
+                let col = it.next().and_then(|p| p.get(0)).copied().unwrap_or(1) as usize;
+
+                s.cursor_row = row.saturating_sub(1).min(s.rows.saturating_sub(1));
+                s.cursor_col = col.saturating_sub(1).min(s.cols.saturating_sub(1));
+                info!("moving cursor to position {} {}", row, col);
             }
-            // Cursor Up: CSI <n> A
             'A' => {
-                let n = params.first()
-                    .and_then(|p| std::str::from_utf8(p).ok())
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1);
+                let n = params
+                    .iter()
+                    .next()
+                    .and_then(|p| p.get(0))
+                    .copied()
+                    .unwrap_or(1) as usize;
                 s.cursor_row = s.cursor_row.saturating_sub(n);
             }
             // Cursor Down: CSI <n> B
+            // CSI Ps B
+            //   Cursor Down Ps Times (default = 1) (CUD).
             'B' => {
-                let n = params.first()
-                    .and_then(|p| std::str::from_utf8(p).ok())
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(1);
-                s.cursor_row = (s.cursor_row + n).min(s.rows - 1);
+                let n = params
+                    .iter()
+                    .next()
+                    .and_then(|p| p.get(0))
+                    .copied()
+                    .unwrap_or(1) as usize;
+                s.cursor_row = (s.cursor_row + n).min(s.rows.saturating_sub(1));
             }
             // Erase Display: CSI 2 J  -> clear screen
+            // CSI Ps J  —  Erase in Display (ED).
+            //   Ps = 0  ⇒  Erase from active position to end of screen (default).
+            //   Ps = 1  ⇒  Erase from beginning of screen to active position.
+            //   Ps = 2  ⇒  Erase entire screen.
+            //   Ps = 3  ⇒  Erase saved lines (if any).
             'J' => {
-                let mode = params.first()
-                    .and_then(|p| std::str::from_utf8(p).ok())
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(0);
-                if mode == 2 {
-                    s.clear();
+                let ps = params
+                    .iter()
+                    .next()
+                    .and_then(|p| p.get(0))
+                    .copied()
+                    .unwrap_or(0) as usize;
+                match ps {
+                    2 => s.clear(), // Clear entire screen
+                    // You can implement other J behaviors here if needed
+                    _ => {}
                 }
             }
             _ => {}
@@ -94,4 +108,3 @@ impl Perform for TerminalPerformer {
     fn osc_dispatch(&mut self, _: &[&[u8]], _: bool) {}
     fn esc_dispatch(&mut self, _: &[u8], _: bool, _: u8) {}
 }
-
