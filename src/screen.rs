@@ -88,9 +88,11 @@ impl Screen {
         // Adjust cols for each row
         for row in &mut self.grid {
             match new_cols.cmp(&self.cols) {
-                std::cmp::Ordering::Greater => row.extend((0..(new_cols - self.cols)).map(|_| Cell::default())),
+                std::cmp::Ordering::Greater => {
+                    row.extend((0..(new_cols - self.cols)).map(|_| Cell::default()))
+                }
                 std::cmp::Ordering::Less => row.truncate(new_cols),
-                _ => ()
+                _ => (),
             }
         }
         self.cols = new_cols;

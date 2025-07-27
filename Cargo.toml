@@ -3,6 +3,14 @@ name = "tesse-rs"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "tesse_rs" # This should match your crate name in `use tesse_rs::...`
+path = "src/lib.rs" # Point to your main library file
+
+[[bin]] # This declares a binary target
+name = "tessers" # Give your application a specific name
+path = "src/main.rs" # Point to your application's main file
+
 [dependencies]
 crossterm = "0.29.0"
 portable-pty = "0.9.0"

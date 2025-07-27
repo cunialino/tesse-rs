@@ -26,4 +26,3 @@ fn print_state(screen: &Screen, label: &str) {
     }
     println!();
 }
-
