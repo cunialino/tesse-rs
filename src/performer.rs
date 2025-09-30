@@ -1,34 +1,65 @@
-use crate::screen::Screen;
+use crate::{cursor::Cursor, screen::Screen};
 use tracing::info;
 use vte::{Params, Perform};
 
-/// A performer that applies parsed bytes to our Screen model
 pub struct TerminalPerformer {
     pub screen: Screen,
-    // Buffer for intermediate OSC/DCS if needed later
+    pub curs: Cursor,
     pub osc_buffer: Vec<u8>,
 }
 
 impl TerminalPerformer {
-    /// Create a new performer given a shared Screen
-    pub fn new(screen: Screen) -> Self {
+    pub fn new(screen: Screen, curs: Cursor) -> Self {
         TerminalPerformer {
             screen,
+            curs,
             osc_buffer: Vec::new(),
         }
+    }
+    fn clear(&mut self) {
+        self.screen.clear();
+        self.curs.reset();
+    }
+
+    fn line_feed(&mut self) {
+        info!("Line feeding");
+        if self.curs.last_row_avail() {
+            self.screen.scroll_up();
+        } else {
+            self.curs.advance_n_rows(1);
+        }
+        self.curs.reset_col();
+    }
+
+    fn put_char(&mut self, c: char) {
+        if self.curs.last_col_avail() {
+            info!("Feeding");
+            self.line_feed();
+        }
+        if !self.curs.last_col_avail() {
+            let pos = self.curs.get_position();
+            info!("Printing char {} to position {} {}", c, pos.0, pos.1);
+            self.screen.char_in_grid(c, pos);
+            self.curs.advance_n_cols(1);
+        }
+    }
+
+    fn resize(&mut self, rows: usize, cols: usize) {
+        self.screen.resize(rows, cols);
+        self.curs.clamp(rows, cols);
     }
 }
 
 impl Perform for TerminalPerformer {
     fn print(&mut self, c: char) {
-        self.screen.put_char(c);
+        self.put_char(c);
     }
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            b'\n' => self.screen.line_feed(),
-            b'\r' => self.screen.cursor_col = 0,
-            0x0C    /* FF */ => self.screen.clear(),
+            b'\n' => self.line_feed(),
+            b'\r' => self.curs.reset_col(),
+            0x0C    /* FF */ => self.clear(),
             _ => {},
         }
     }
@@ -55,13 +86,8 @@ impl Perform for TerminalPerformer {
                 let row = it.next().and_then(|p| p.get(0)).copied().unwrap_or(1) as usize;
                 let col = it.next().and_then(|p| p.get(0)).copied().unwrap_or(1) as usize;
 
-                self.screen.cursor_row = row
-                    .saturating_sub(1)
-                    .min(self.screen.rows.saturating_sub(1));
-                self.screen.cursor_col = col
-                    .saturating_sub(1)
-                    .min(self.screen.cols.saturating_sub(1));
-                info!("moving cursor to position {} {}", row, col);
+                self.curs
+                    .set_position(row.saturating_sub(1), col.saturating_sub(1));
             }
             // ESC [ Pn A
             // default value: 1
@@ -78,7 +104,7 @@ impl Perform for TerminalPerformer {
                     .and_then(|p| p.get(0))
                     .copied()
                     .unwrap_or(1) as usize;
-                self.screen.cursor_row = self.screen.cursor_row.saturating_sub(n);
+                self.curs.recede_n_rows(n);
             }
             // CSI Ps B
             //   Cursor Down Ps Times (default = 1) (CUD).
@@ -96,11 +122,7 @@ impl Perform for TerminalPerformer {
                     .copied()
                     .unwrap_or(1) as usize;
 
-                self.screen.cursor_row = self
-                    .screen
-                    .cursor_row
-                    .saturating_add(n)
-                    .min(self.screen.rows.saturating_sub(1));
+                self.curs.advance_n_rows(n);
             }
             // Erase Display: CSI 2 J  -> clear screen
             // CSI Ps J  —  Erase in Display (ED).
@@ -125,7 +147,6 @@ impl Perform for TerminalPerformer {
         }
     }
 
-    // No-ops for now
     fn hook(&mut self, _: &Params, _: &[u8], _: bool, _: char) {}
     fn put(&mut self, _: u8) {}
     fn unhook(&mut self) {}
@@ -135,13 +156,17 @@ impl Perform for TerminalPerformer {
 
 #[cfg(test)]
 mod tests {
-    use super::*; // Import everything from the parent module
-    use vte::Parser; // You'll need Parser for these tests
+    use super::*;
+    use tracing::Level;
+    use vte::Parser;
 
-    // Helper to create a performer with a screen
     fn setup_performer(rows: usize, cols: usize) -> TerminalPerformer {
+        tracing_subscriber::fmt()
+            .with_max_level(Level::DEBUG)
+            .init();
         let screen = Screen::new(rows, cols);
-        TerminalPerformer::new(screen.clone())
+        let curs = Cursor::new(rows, cols);
+        TerminalPerformer::new(screen, curs)
     }
 
     #[test]
@@ -153,7 +178,7 @@ mod tests {
 
         let screen_lock = perf.screen;
         assert_eq!(screen_lock.to_lines()[0], "A         ");
-        assert_eq!((screen_lock.cursor_row, screen_lock.cursor_col), (0, 1));
+        assert_eq!(perf.curs.get_position(), (0, 1));
     }
 
     #[test]
@@ -169,7 +194,7 @@ mod tests {
             vec!["ABCDE".to_string(), "FG   ".to_string()]
         );
 
-        assert_eq!((screen_lock.cursor_row, screen_lock.cursor_col), (1, 2));
+        assert_eq!(perf.curs.get_position(), (1, 2));
     }
 
     #[test]
@@ -190,7 +215,7 @@ mod tests {
             vec!["DEF".to_string(), "GHI".to_string()]
         );
 
-        assert_eq!((screen_lock.cursor_row, screen_lock.cursor_col), (1, 2));
+        assert_eq!(perf.curs.get_position(), (1, 2));
     }
 
     #[test]
@@ -199,8 +224,7 @@ mod tests {
         let mut parser = Parser::new();
 
         parser.advance(&mut perf, b"\x1B[3;5H"); // Move to row 3, col 5 (0-indexed: 2,4)
-        let screen_lock = perf.screen;
-        assert_eq!((screen_lock.cursor_row, screen_lock.cursor_col), (2, 4));
+        assert_eq!(perf.curs.get_position(), (2, 4));
     }
 
     #[test]
@@ -218,7 +242,7 @@ mod tests {
             assert_eq!(line, "          ");
         }
 
-        assert_eq!((screen_lock.cursor_row, screen_lock.cursor_col), (0, 0));
+        assert_eq!(perf.curs.get_position(), (0, 0));
     }
 
     #[test]
@@ -229,9 +253,7 @@ mod tests {
         // Initial cursor at (0,0)
         parser.advance(&mut perf, b"\x1B[100A"); // Try to move up 100 lines
 
-        let screen_lock = perf.screen;
-
-        assert_eq!((screen_lock.cursor_row, screen_lock.cursor_col), (0, 0));
+        assert_eq!(perf.curs.get_position(), (0, 0));
     }
 
     #[test]
@@ -241,7 +263,6 @@ mod tests {
 
         parser.advance(&mut perf, b"\x1B[100B");
 
-        let screen_lock = perf.screen;
-        assert_eq!((screen_lock.cursor_row, screen_lock.cursor_col), (4, 0));
+        assert_eq!(perf.curs.get_position(), (4, 0));
     }
 }

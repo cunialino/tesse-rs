@@ -1,4 +1,7 @@
-/// A single cell on the terminal screen, holding a character.
+use std::ops::Index;
+
+use tracing::info;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
@@ -10,61 +13,34 @@ impl Default for Cell {
     }
 }
 
-/// A 2D text screen buffer of fixed size, with cursor tracking.
 #[derive(Clone, Debug)]
 pub struct Screen {
     pub rows: usize,
     pub cols: usize,
     grid: Vec<Vec<Cell>>,
-    pub cursor_row: usize,
-    pub cursor_col: usize,
 }
 
 impl Screen {
-    /// Create a new blank screen of given dimensions.
     pub fn new(rows: usize, cols: usize) -> Self {
         let grid = vec![vec![Cell::default(); cols]; rows];
-        Screen {
-            rows,
-            cols,
-            grid,
-            cursor_row: 0,
-            cursor_col: 0,
-        }
+        Screen { rows, cols, grid }
     }
 
-    /// Clear the entire screen (fill with spaces) and reset cursor.
     pub fn clear(&mut self) {
         for row in &mut self.grid {
             for cell in row.iter_mut() {
                 *cell = Cell::default();
             }
         }
-        self.cursor_row = 0;
-        self.cursor_col = 0;
     }
 
-    /// Move cursor to next line, scrolling up if at bottom.
-    pub fn line_feed(&mut self) {
-        if self.cursor_row + 1 >= self.rows {
-            // scroll up
-            self.grid.remove(0);
-            self.grid.push(vec![Cell::default(); self.cols]);
-        } else {
-            self.cursor_row += 1;
-        }
-        self.cursor_col = 0;
+    pub fn scroll_up(&mut self) {
+        self.grid.remove(0);
+        self.grid.push(vec![Cell::default(); self.cols]);
     }
 
-    /// Write a character at the cursor, advancing it (with wrap).
-    pub fn put_char(&mut self, c: char) {
-        if self.cursor_col >= self.cols {
-            self.line_feed();
-        }
-        if self.cursor_row < self.rows && self.cursor_col < self.cols {
-            self.grid[self.cursor_row][self.cursor_col].ch = c;
-            self.cursor_col += 1;
-        }
+    pub fn char_in_grid(&mut self, c: char, pos: (usize, usize)) {
+        self.grid[pos.0][pos.1].ch = c;
     }
 
     /// Convert each row into a String for rendering or inspection.
@@ -75,44 +51,57 @@ impl Screen {
             .collect()
     }
 
-    /// Resize the screen, preserving content where possible.
     pub fn resize(&mut self, new_rows: usize, new_cols: usize) {
-        // Adjust rows
+        info!("Resizing to {} {}", new_rows, new_cols);
         match new_rows.cmp(&self.rows) {
-            std::cmp::Ordering::Greater => self.grid.push(vec![Cell::default(); self.cols]),
-            std::cmp::Ordering::Less => self.grid.push(vec![Cell::default(); self.cols]),
-            _ => (),
+            std::cmp::Ordering::Greater => self
+                .grid
+                .resize_with(new_cols, || vec![Cell::default(); self.cols]),
+            std::cmp::Ordering::Less => {
+                info!("Dropping rows");
+                let dr = self.grid.drain(0..self.rows - new_rows);
+                info!("Dropped {:?}", dr.collect::<Vec<_>>());
+            }
+            _ => {
+                info!("Rows are the same as before");
+            }
         }
         self.rows = new_rows;
 
-        // Adjust cols for each row
-        for row in &mut self.grid {
-            match new_cols.cmp(&self.cols) {
-                std::cmp::Ordering::Greater => {
+        match new_cols.cmp(&self.cols) {
+            std::cmp::Ordering::Greater => {
+                for row in &mut self.grid {
                     row.extend((0..(new_cols - self.cols)).map(|_| Cell::default()))
                 }
-                std::cmp::Ordering::Less => row.truncate(new_cols),
-                _ => (),
             }
+            std::cmp::Ordering::Less => {
+                let mut overflow: Vec<_> = Vec::new();
+
+                for row in &mut self.grid {
+                    if !overflow.is_empty() {
+                        row.splice(0..0, overflow.drain(..));
+                    }
+
+                    overflow = row.drain(new_cols..).collect();
+                }
+            }
+            _ => (),
         }
         self.cols = new_cols;
-
-        // Clamp cursor
-        self.cursor_row = self.cursor_row.min(self.rows.saturating_sub(1));
-        self.cursor_col = self.cursor_col.min(self.cols.saturating_sub(1));
     }
 }
 
-// Unit tests for the screen module
 #[cfg(test)]
 mod tests {
+    use tracing::Level;
+
     use super::*;
 
     #[test]
     fn test_put_and_to_lines() {
         let mut s = Screen::new(2, 5);
-        s.put_char('H');
-        s.put_char('i');
+        s.char_in_grid('H', (0, 0));
+        s.char_in_grid('i', (0, 1));
         let lines = s.to_lines();
         assert_eq!(lines, vec!["Hi   ".to_string(), "     ".to_string()]);
     }
@@ -120,10 +109,9 @@ mod tests {
     #[test]
     fn test_line_feed_and_scroll() {
         let mut s = Screen::new(2, 3);
-        s.put_char('A');
-        s.line_feed();
-        s.put_char('B');
-        s.put_char('C');
+        s.char_in_grid('A', (0, 0));
+        s.char_in_grid('B', (1, 0));
+        s.char_in_grid('C', (1, 1));
         let lines = s.to_lines();
         assert_eq!(lines, vec!["A  ".to_string(), "BC ".to_string()]);
     }
@@ -131,27 +119,34 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut s = Screen::new(2, 2);
-        s.put_char('X');
-        s.line_feed();
-        s.put_char('Y');
+        s.char_in_grid('A', (0, 0));
+        s.char_in_grid('B', (1, 0));
         s.clear();
         let lines = s.to_lines();
         assert_eq!(lines, vec!["  ".to_string(), "  ".to_string()]);
-        assert_eq!(s.cursor_row, 0);
-        assert_eq!(s.cursor_col, 0);
     }
 
     #[test]
     fn test_resize() {
         let mut s = Screen::new(2, 2);
-        s.put_char('1');
-        s.line_feed();
-        s.put_char('2');
+        s.char_in_grid('1', (0, 0));
+        s.char_in_grid('2', (1, 0));
         s.resize(3, 3);
         let lines = s.to_lines();
         assert_eq!(
             lines,
             vec!["1  ".to_string(), "2  ".to_string(), "   ".to_string()]
         );
+    }
+
+    #[test]
+    fn test_resize_shrink() {
+        let mut s = Screen::new(2, 3);
+        s.char_in_grid('1', (0, 0));
+        s.char_in_grid('1', (0, 1));
+        s.char_in_grid('1', (0, 2));
+        s.resize(2, 2);
+        let lines = s.to_lines();
+        assert_eq!(lines, vec!["11".to_string(), "1 ".to_string(),]);
     }
 }
